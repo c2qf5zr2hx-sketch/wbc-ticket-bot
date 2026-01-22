@@ -41,15 +41,17 @@ def fetch_page_text(url: str) -> str:
     r.raise_for_status()
     return r.text
 
-def classify(text: str) -> str:
+def classify(text: str):
     available = ["受付中", "残りわずか", "Available", "In stock", "○"]
     unavailable = ["受付終了", "予定枚数終了", "Sold out", "Unavailable", "×", "Not available"]
 
-    if any(k in text for k in available):
-        return "AVAILABLE"
-    if any(k in text for k in unavailable):
-        return "SOLDOUT"
-    return "UNKNOWN"
+    for k in available:
+        if k in text:
+            return "AVAILABLE", k
+    for k in unavailable:
+        if k in text:
+            return "SOLDOUT", k
+    return "UNKNOWN", ""
 
 def monitor_loop():
     if not TARGET_URL:
@@ -57,17 +59,20 @@ def monitor_loop():
         return
 
     last_state = None
+
     code, resp = line_push(f"🟢 開始監控票況（每3分鐘）\n{TARGET_URL}")
     print("START PUSH:", code, resp)
 
     while True:
         try:
             text = fetch_page_text(TARGET_URL)
-            state = classify(text)
-            print("ticket_state:", state)
+            state, hit = classify(text)
+            print("ticket_state:", state, "hit:", hit)
 
             if state != last_state:
-                msg = f"🎫 票況變更：{state}\n{TARGET_URL}"
+                emoji = "🎉" if state == "AVAILABLE" else ("🚫" if state == "SOLDOUT" else "❓")
+                hit_text = f"（偵測到：{hit}）" if hit else ""
+                msg = f"{emoji} 票況變更：{state}{hit_text}\n{TARGET_URL}"
                 code, resp = line_push(msg)
                 print("PUSH:", code, resp)
                 last_state = state
@@ -81,4 +86,5 @@ def monitor_loop():
 def home():
     return "OK"
 
+# Render 啟動後背景監控（服務活著時會一直跑）
 threading.Thread(target=monitor_loop, daemon=True).start()
