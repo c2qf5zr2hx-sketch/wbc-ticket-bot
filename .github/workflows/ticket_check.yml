@@ -22,10 +22,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # ✅ 關鍵：把 Secrets → 環境變數（不做就會 KeyError）
+      # ✅ 關鍵：把 Secrets → 環境變數（不做就會 KeyError）cancel-timeout-minutes: 
       - name: Run ticket checker
         env:
           LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_CHANNEL_SECRET: ${{ secrets.LINE_CHANNEL_SECRET }}
           LINE_TO_USER: ${{ secrets.LINE_TO_USER }}
           TARGET_URL: ${{ secrets.TARGET_URL }}
         run: |
