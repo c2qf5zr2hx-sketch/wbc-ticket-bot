@@ -3,84 +3,83 @@ import json
 import hashlib
 import requests
 
-TARGET_URL = os.environ["TARGET_URL"]
-LINE_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
-TO_USER = os.environ["LINE_TO_USER"]
+STATE_FILE = "state.json"
 
-STATE_FILE = "ticket_state.json"
+def env_required(key: str) -> str:
+    v = os.getenv(key)
+    if not v:
+        raise RuntimeError(f"Missing env var: {key} (check GitHub Secrets/Workflow env mapping)")
+    return v
 
-def line_push(text: str):
-    headers = {
-        "Authorization": f"Bearer {LINE_TOKEN}",
-        "Content-Type": "application/json",
-    }
-    payload = {"to": TO_USER, "messages": [{"type": "text", "text": text}]}
-    r = requests.post(
-        "https://api.line.me/v2/bot/message/push",
-        headers=headers,
-        json=payload,
-        timeout=20,
-    )
-    r.raise_for_status()
-
-def fetch_page_text(url: str) -> str:
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
-            "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
-        )
-    }
-    r = requests.get(url, headers=headers, timeout=25)
-    r.raise_for_status()
-    return r.text
-
-def classify(text: str):
-    available = ["受付中", "残りわずか", "Available", "In stock", "○"]
-    unavailable = ["受付終了", "予定枚数終了", "Sold out", "Unavailable", "×", "Not available"]
-
-    for k in available:
-        if k in text:
-            return "AVAILABLE", k
-    for k in unavailable:
-        if k in text:
-            return "SOLDOUT", k
-    return "UNKNOWN", ""
-
-def load_last_state():
+def load_state():
     if not os.path.exists(STATE_FILE):
-        return None
+        return {}
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f).get("state")
+            return json.load(f)
     except Exception:
-        return None
+        return {}
 
-def save_state(state: str):
+def save_state(state: dict):
     with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump({"state": state}, f, ensure_ascii=False)
+        json.dump(state, f, ensure_ascii=False, indent=2)
+
+def sha(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()
+
+def push_line(access_token: str, to_user: str, message: str):
+    url = "https://api.line.me/v2/bot/message/push"
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "to": to_user,
+        "messages": [{"type": "text", "text": message}],
+    }
+    r = requests.post(url, headers=headers, data=json.dumps(payload))
+    if r.status_code >= 300:
+        raise RuntimeError(f"LINE push failed: {r.status_code} {r.text}")
+
+def detect_status(html: str) -> str:
+    # 你目前訊息出現「受付中」→ 這樣判斷就會打到 AVAILABLE
+    if "受付中" in html or "AVAILABLE" in html or "Available" in html:
+        return "AVAILABLE（偵測到：受付中）"
+    if "予定枚数終了" in html or "SOLD OUT" in html:
+        return "SOLD_OUT（予定枚数終了）"
+    if "受付終了" in html or "CLOSED" in html:
+        return "CLOSED（受付終了）"
+    return "UNKNOWN（未命中關鍵字）"
 
 def main():
-    html = fetch_page_text(TARGET_URL)
-    state, hit = classify(html)
+    access_token = env_required("LINE_CHANNEL_ACCESS_TOKEN")
+    to_user = env_required("LINE_TO_USER")
+    target_url = env_required("TARGET_URL")
 
-    last_state = load_last_state()
+    # 抓頁面
+    r = requests.get(target_url, timeout=20, headers={
+        "User-Agent": "Mozilla/5.0",
+        "Accept-Language": "ja,en;q=0.8,zh-TW;q=0.7",
+    })
+    r.raise_for_status()
+    html = r.text
 
-    # 第一次跑：先記錄，不通知（避免一上線就吵你）
-    if last_state is None:
+    status = detect_status(html)
+    fp = sha(status + "|" + target_url)
+
+    state = load_state()
+    last_fp = state.get("last_fp")
+
+    # ✅ 只有狀態變了才推播
+    if fp != last_fp:
+        msg = f"🎉 票況變更：{status}\n{target_url}"
+        push_line(access_token, to_user, msg)
+        state["last_fp"] = fp
+        state["last_status"] = status
         save_state(state)
-        print("First run, saved state:", state)
-        return
-
-    # 有變化才推播
-    if state != last_state:
-        emoji = "🎉" if state == "AVAILABLE" else ("🚫" if state == "SOLDOUT" else "❓")
-        hit_text = f"（偵測到：{hit}）" if hit else ""
-        msg = f"{emoji} 票況變更：{state}{hit_text}\n{TARGET_URL}"
-        line_push(msg)
-        save_state(state)
-        print("Changed:", last_state, "->", state)
+        print("Changed -> pushed.")
     else:
-        print("No change:", state)
+        print("No change.")
 
 if __name__ == "__main__":
     main()
