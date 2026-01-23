@@ -1,69 +1,33 @@
-import os
-import re
-import requests
+name: Ticket Checker
 
-def push_line(message: str):
-    token = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
-    to_user = os.environ["LINE_TO_USER"]
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/5 * * * *"
 
-    url = "https://api.line.me/v2/bot/message/push"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "to": to_user,
-        "messages": [{"type": "text", "text": message}],
-    }
-    r = requests.post(url, headers=headers, json=payload, timeout=20)
-    r.raise_for_status()
+jobs:
+  run-check:
+    runs-on: ubuntu-latest
 
-def fetch_page(target_url: str) -> tuple[int, str]:
-    # 讓請求更像一般瀏覽器，降低被擋機率
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
-        "Referer": "https://eplus.tickets/",
-        "Connection": "keep-alive",
-    }
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
-    r = requests.get(target_url, headers=headers, timeout=25, allow_redirects=True)
-    return r.status_code, r.text
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-def parse_status(html: str) -> str:
-    # 你之前是用「受付中」判斷可買，這裡保留同樣邏輯
-    if "受付中" in html:
-        return "AVAILABLE（偵測到：受付中）"
-    if "予定枚数終了" in html:
-        return "SOLD_OUT（予定枚数終了）"
-    if "受付終了" in html:
-        return "CLOSED（受付終了）"
-    return "UNKNOWN（未匹配到關鍵字）"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-def main():
-    target_url = os.environ["TARGET_URL"]
-
-    code, html = fetch_page(target_url)
-
-    # ✅ 403：被網站擋，不要讓 Actions 失敗；改成通知你一次
-    if code == 403:
-        push_line("⚠️ 票況檢查被網站擋下（HTTP 403）。\n"
-                  "這通常是 eplus 對 GitHub Actions 的 IP/爬蟲防護。\n"
-                  f"{target_url}")
-        return
-
-    # 其他非 200 也先通知，但不要整個爆掉
-    if code != 200:
-        push_line(f"⚠️ 票況頁面回傳非 200：HTTP {code}\n{target_url}")
-        return
-
-    status = parse_status(html)
-    push_line(f"🎫 票況檢查結果：{status}\n{target_url}")
-
-if __name__ == "__main__":
-    main()
+      - name: Run ticket checker
+        env:
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_CHANNEL_SECRET: ${{ secrets.LINE_CHANNEL_SECRET }}
+          LINE_TO_USER: ${{ secrets.LINE_TO_USER }}
+          TARGET_URL: ${{ vars.TARGET_URL }}
+        run: |
+          python check_ticket.py
