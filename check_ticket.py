@@ -1,48 +1,43 @@
 import os
-import json
-import hashlib
+import time
 import requests
 
-STATE_FILE = "state.json"
+LINE_PUSH_URL = "https://api.line.me/v2/bot/message/push"
 
-def env_required(key: str) -> str:
-    v = os.getenv(key)
+def must_env(name: str) -> str:
+    v = os.getenv(name)
     if not v:
-        raise RuntimeError(f"Missing env var: {key} (check GitHub Secrets/Workflow env mapping)")
+        raise RuntimeError(f"Missing env var: {name}")
     return v
 
-def load_state():
-    if not os.path.exists(STATE_FILE):
-        return {}
-    try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-def save_state(state: dict):
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
-
-def sha(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()
-
-def push_line(access_token: str, to_user: str, message: str):
-    url = "https://api.line.me/v2/bot/message/push"
+def line_push(token: str, to_user: str, text: str) -> None:
     headers = {
-        "Authorization": f"Bearer {access_token}",
+        "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     }
     payload = {
         "to": to_user,
-        "messages": [{"type": "text", "text": message}],
+        "messages": [{"type": "text", "text": text}],
     }
-    r = requests.post(url, headers=headers, data=json.dumps(payload))
-    if r.status_code >= 300:
-        raise RuntimeError(f"LINE push failed: {r.status_code} {r.text}")
+    r = requests.post(LINE_PUSH_URL, headers=headers, json=payload, timeout=20)
+    if r.status_code >= 400:
+        print("LINE push failed:", r.status_code, r.text)
 
-def detect_status(html: str) -> str:
-    # 你目前訊息出現「受付中」→ 這樣判斷就會打到 AVAILABLE
+def fetch_page(url: str, timeout: int = 25) -> requests.Response:
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/122.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+    }
+    return requests.get(url, headers=headers, timeout=timeout, allow_redirects=True)
+
+def parse_status(html: str) -> str:
     if "受付中" in html or "AVAILABLE" in html or "Available" in html:
         return "AVAILABLE（偵測到：受付中）"
     if "予定枚数終了" in html or "SOLD OUT" in html:
@@ -52,34 +47,42 @@ def detect_status(html: str) -> str:
     return "UNKNOWN（未命中關鍵字）"
 
 def main():
-    access_token = env_required("LINE_CHANNEL_ACCESS_TOKEN")
-    to_user = env_required("LINE_TO_USER")
-    target_url = env_required("TARGET_URL")
+    token = must_env("LINE_CHANNEL_ACCESS_TOKEN")
+    to_user = must_env("LINE_TO_USER")
+    target_url = must_env("TARGET_URL")
 
-    # 抓頁面
-    r = requests.get(target_url, timeout=20, headers={
-        "User-Agent": "Mozilla/5.0",
-        "Accept-Language": "ja,en;q=0.8,zh-TW;q=0.7",
-    })
-    r.raise_for_status()
-    html = r.text
+    tries = 3
+    for i in range(tries):
+        try:
+            resp = fetch_page(target_url, timeout=25)
 
-    status = detect_status(html)
-    fp = sha(status + "|" + target_url)
+            if resp.status_code == 403:
+                line_push(
+                    token, to_user,
+                    "⚠️ 票況檢查被網站擋下（HTTP 403）。\n"
+                    "這通常是網站防爬/封鎖雲端 IP（GitHub Actions 很常遇到）。\n"
+                    f"{target_url}"
+                )
+                print("403 Forbidden - handled.")
+                return  # ✅ 讓 workflow 成功結束（不紅叉）
 
-    state = load_state()
-    last_fp = state.get("last_fp")
+            if resp.status_code != 200:
+                line_push(token, to_user, f"⚠️ 票況頁回傳 HTTP {resp.status_code}\n{target_url}")
+                print(f"HTTP {resp.status_code} - handled.")
+                return
 
-    # ✅ 只有狀態變了才推播
-    if fp != last_fp:
-        msg = f"🎉 票況變更：{status}\n{target_url}"
-        push_line(access_token, to_user, msg)
-        state["last_fp"] = fp
-        state["last_status"] = status
-        save_state(state)
-        print("Changed -> pushed.")
-    else:
-        print("No change.")
+            status = parse_status(resp.text)
+            line_push(token, to_user, f"🎫 票況檢查結果：{status}\n{target_url}")
+            print("OK - pushed.")
+            return
+
+        except Exception as e:
+            # 最後一次才通知錯誤
+            if i == tries - 1:
+                line_push(token, to_user, f"⚠️ 票況檢查發生錯誤：{e}\n{target_url}")
+                print("Error:", e)
+                return
+            time.sleep(2)
 
 if __name__ == "__main__":
     main()
